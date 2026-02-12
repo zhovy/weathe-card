@@ -1,0 +1,379 @@
+// ========== 全局状态 ==========
+let currentCity = { name: "济南市", lat: 36.6512, lon: 117.1201, province: "山东" };
+let mode = 'realtime';          // 'realtime' 或 'forecast'
+let forecastDayIndex = 0;       // 当 mode='forecast' 时，当前显示的预报日期索引（0=今天，1=明天...）
+let cachedDailyData = null;    // 缓存最近一次获取的 daily 数据
+
+// ========== 更新公历、农历、节日显示（头部）==========
+function updateDateDisplay(date = new Date()) {
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    const day = date.getDate();
+    const weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+    const weekday = weekdays[date.getDay()];
+    document.getElementById('solar-date').innerHTML = `${year}年${month}月${day}日 ${weekday}`;
+
+    // 完整农历（含年份）
+    document.getElementById('lunar-date').innerHTML = getLunarDate(date);
+
+    // 节日：农历节日 + 公历节气
+    const lunarFestival = typeof getLunarFestival === 'function' ? getLunarFestival(date) : '';
+    const solarTerm = typeof getSolarTerm === 'function' ? getSolarTerm(date) : '';
+    let festivalText = '';
+    if (lunarFestival && solarTerm) {
+        festivalText = `${lunarFestival} · ${solarTerm}`;
+    } else if (lunarFestival) {
+        festivalText = lunarFestival;
+    } else if (solarTerm) {
+        festivalText = solarTerm;
+    }
+    document.getElementById('festival-today').innerHTML = festivalText ? festivalText : '';
+}
+
+// ========== 渲染省份下拉框 ==========
+function renderProvinceSelect() {
+    const sel = document.getElementById('province-select');
+    sel.innerHTML = '';
+    Object.keys(CHINA_CITIES).sort().forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p;
+        opt.textContent = p;
+        if (p === currentCity.province) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+// ========== 根据省份渲染城市下拉框 ==========
+function renderCitySelect(province) {
+    const sel = document.getElementById('city-select');
+    sel.innerHTML = '';
+    const cities = CHINA_CITIES[province];
+    if (!cities) return;
+    Object.keys(cities).sort().forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        if (province === currentCity.province && c === currentCity.name) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+// ========== 切换到选中的城市（来自下拉框）并重置为实时模式 ==========
+function switchToSelectedCity() {
+    const province = document.getElementById('province-select').value;
+    const city = document.getElementById('city-select').value;
+    if (!province || !city) return;
+    const latlon = CHINA_CITIES[province][city];
+    if (!latlon) return;
+    currentCity = { name: city, lat: latlon[0], lon: latlon[1], province: province };
+    document.getElementById('city-name').textContent = city;
+    mode = 'realtime';
+    forecastDayIndex = 0;
+    fetchWeatherAndUpdate();
+}
+
+// ========== 绑定选择器事件 ==========
+function bindSelectors() {
+    const provSel = document.getElementById('province-select');
+    provSel.addEventListener('change', function() {
+        renderCitySelect(this.value);
+        const firstCity = Object.keys(CHINA_CITIES[this.value])[0];
+        const latlon = CHINA_CITIES[this.value][firstCity];
+        currentCity = { name: firstCity, lat: latlon[0], lon: latlon[1], province: this.value };
+        document.getElementById('city-name').textContent = firstCity;
+        mode = 'realtime';
+        forecastDayIndex = 0;
+        fetchWeatherAndUpdate();
+    });
+    document.getElementById('confirm-city').addEventListener('click', switchToSelectedCity);
+}
+
+// ========== 根据实时数据更新UI（实时模式）==========
+function renderRealtimeUI(d) {
+    const cur = d.current;
+    const daily = d.daily;
+    cachedDailyData = daily;
+
+    const temp = cur.temperature_2m !== undefined ? formatOneDecimal(cur.temperature_2m) : '--';
+    const high = daily?.temperature_2m_max?.[0] !== undefined ? Math.round(daily.temperature_2m_max[0]) : '--';
+    const low = daily?.temperature_2m_min?.[0] !== undefined ? Math.round(daily.temperature_2m_min[0]) : '--';
+    const hum = cur.relative_humidity_2m ?? '--';
+    const wind = cur.wind_speed_10m !== undefined ? Math.round(cur.wind_speed_10m) : '--';
+    const feel = cur.apparent_temperature !== undefined ? formatOneDecimal(cur.apparent_temperature) : '--';
+    let uv = cur.uv_index ?? '--';
+    const uvVal = (typeof uv === 'number') ? uv.toFixed(1) : uv;
+    const uvLev = (typeof uv === 'number') ? getUvLevel(uv) : '--';
+    const wcode = cur.weather_code ?? -1;
+    const { icon, desc } = getWeatherInfo(wcode);
+    const cloud = cur.cloud_cover ?? '--';
+    const press = cur.pressure_msl !== undefined ? Math.round(cur.pressure_msl) : '--';
+    let vis = cur.visibility !== undefined ? (cur.visibility / 1000).toFixed(1) : '--';
+    const dew = cur.dewpoint_2m !== undefined ? formatOneDecimal(cur.dewpoint_2m) : '--';
+    const precipToday = daily?.precipitation_probability_max?.[0] ?? '--';
+
+    document.getElementById('current-temp').textContent = temp;
+    document.getElementById('high-temp').textContent = high;
+    document.getElementById('low-temp').textContent = low;
+    document.getElementById('weather-icon').textContent = icon;
+    document.getElementById('weather-desc').textContent = desc;
+    document.getElementById('humidity-val').textContent = hum;
+    document.getElementById('wind-val').textContent = wind;
+    document.getElementById('feelslike-val').textContent = feel;
+    document.getElementById('uv-val').textContent = uvVal;
+    document.getElementById('uv-desc').textContent = uvLev;
+    document.getElementById('precip-prob').textContent = precipToday;
+    document.getElementById('cloud-val').textContent = cloud;
+    document.getElementById('pressure-val').textContent = press;
+    document.getElementById('visibility-val').textContent = vis;
+    document.getElementById('dewpoint-val').textContent = dew;
+
+    const advice = generateTodayAdvice(
+        cur.temperature_2m ?? null,
+        wcode,
+        cur.relative_humidity_2m ?? null,
+        cur.wind_speed_10m ?? null,
+        cur.uv_index ?? null,
+        cur.apparent_temperature ?? null,
+        precipToday !== '--' ? precipToday : null,
+        cloud !== '--' ? cloud : null
+    );
+    document.getElementById('today-advice-text').textContent = advice;
+
+    // 恢复温度单位显示（清除预报模式添加的标注）
+    const tempUnitEl = document.querySelector('.temp-unit');
+    tempUnitEl.innerHTML = '°C';
+
+    updateDateDisplay(new Date());
+}
+
+// ========== 根据预报数据更新UI（预报模式）==========
+function renderForecastUI(dayIndex) {
+    if (!cachedDailyData) return;
+    const daily = cachedDailyData;
+    if (!daily.time[dayIndex]) return;
+
+    const dateStr = daily.time[dayIndex];
+    const dateObj = new Date(dateStr + 'T12:00:00');
+    const wcode = daily.weather_code[dayIndex];
+    const { icon, desc } = getWeatherInfo(wcode);
+    const maxTemp = Math.round(daily.temperature_2m_max[dayIndex]);
+    const minTemp = Math.round(daily.temperature_2m_min[dayIndex]);
+    const precipProb = daily.precipitation_probability_max?.[dayIndex] ?? '--';
+    const uvMax = daily.uv_index_max?.[dayIndex] ?? null;
+    const uvVal = uvMax !== null ? uvMax.toFixed(1) : '--';
+    const uvLev = uvMax !== null ? getUvLevel(uvMax) : '--';
+    const windMax = daily.wind_speed_10m_max?.[dayIndex] ?? null;
+    const windVal = windMax !== null ? Math.round(windMax) : '--';
+
+    document.getElementById('current-temp').textContent = maxTemp;
+    const tempUnitEl = document.querySelector('.temp-unit');
+    tempUnitEl.innerHTML = '°C<span style="font-size:0.8rem; margin-left:4px; color:#4a7a8c;">(最高)</span>';
+    document.getElementById('high-temp').textContent = maxTemp;
+    document.getElementById('low-temp').textContent = minTemp;
+    document.getElementById('weather-icon').textContent = icon;
+    document.getElementById('weather-desc').textContent = desc;
+
+    document.getElementById('humidity-val').textContent = '--';
+    document.getElementById('wind-val').textContent = windVal;
+    document.getElementById('feelslike-val').textContent = '--';
+    document.getElementById('uv-val').textContent = uvVal;
+    document.getElementById('uv-desc').textContent = uvLev;
+    document.getElementById('precip-prob').textContent = precipProb;
+    document.getElementById('cloud-val').textContent = '--';
+    document.getElementById('pressure-val').textContent = '--';
+    document.getElementById('visibility-val').textContent = '--';
+    document.getElementById('dewpoint-val').textContent = '--';
+
+    const advice = generateDailyAdvice(
+        wcode,
+        maxTemp,
+        minTemp,
+        precipProb !== '--' ? precipProb : null,
+        uvMax,
+        windMax
+    );
+    document.getElementById('today-advice-text').textContent = '📆 ' + advice;
+
+    updateDateDisplay(dateObj);
+}
+
+// ========== 渲染未来5天预报卡片（不含农历）==========
+function renderForecastCards(daily) {
+    const fc = document.getElementById('forecast-container');
+    fc.innerHTML = '';
+
+    if (!daily || !daily.time) return;
+
+    for (let i = 1; i <= 5; i++) {
+        if (daily.time[i]) {
+            const dateStr = daily.time[i];
+            const dateObj = new Date(dateStr + 'T12:00:00');
+            const month = dateObj.getMonth() + 1;
+            const day = dateObj.getDate();
+            const solarDisplay = `${month}/${day}`;
+            const weekday = getWeekday(dateStr);
+            const cd = daily.weather_code[i];
+            const { icon: fcIcon } = getWeatherInfo(cd);
+            const max = Math.round(daily.temperature_2m_max[i]);
+            const min = Math.round(daily.temperature_2m_min[i]);
+            const pp = daily.precipitation_probability_max?.[i] ?? null;
+            const ppt = pp !== null ? pp + '%' : '--%';
+            const uvx = daily.uv_index_max?.[i] ?? null;
+            const wx = daily.wind_speed_10m_max?.[i] ?? null;
+            const tip = generateDailyAdvice(cd, max, min, pp, uvx, wx);
+
+            const item = document.createElement('div');
+            item.className = 'forecast-item';
+            if (mode === 'forecast' && i === forecastDayIndex) {
+                item.classList.add('active-forecast');
+            }
+            item.innerHTML = `
+        <span class="forecast-weekday">${weekday}</span>
+        <span class="forecast-date">${solarDisplay}</span>
+        <span class="forecast-icon">${fcIcon}</span>
+        <span class="forecast-temp">
+          <span class="forecast-high">${max}°</span>
+          <span class="forecast-low">${min}°</span>
+        </span>
+        <span class="forecast-precip"><span>🌧️</span> ${ppt}</span>
+        <span class="forecast-advice" title="${tip}">${tip}</span>
+      `;
+
+            // 点击卡片切换到该天预报视图
+            item.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (mode === 'forecast' && i === forecastDayIndex) {
+                    fetchWeatherAndUpdate(); // 刷新数据
+                } else {
+                    mode = 'forecast';
+                    forecastDayIndex = i;
+                    if (cachedDailyData) {
+                        renderForecastUI(i);
+                        document.querySelectorAll('.forecast-item').forEach(el => el.classList.remove('active-forecast'));
+                        this.classList.add('active-forecast');
+                        document.getElementById('update-timestamp').innerHTML = `📌 预报 · 更新于 ${new Date().getHours().toString().padStart(2,'0')}:${new Date().getMinutes().toString().padStart(2,'0')}`;
+                    } else {
+                        fetchWeatherAndUpdate().then(() => {
+                            document.querySelectorAll('.forecast-item').forEach(el => el.classList.remove('active-forecast'));
+                            this.classList.add('active-forecast');
+                        });
+                    }
+                }
+            });
+
+            fc.appendChild(item);
+        }
+    }
+}
+
+// ========== 获取天气数据并更新UI（主流程）==========
+async function fetchWeatherAndUpdate() {
+    try {
+        const d = await fetchWeatherData(currentCity.lat, currentCity.lon);
+        cachedDailyData = d.daily;
+
+        if (mode === 'realtime') {
+            renderRealtimeUI(d);
+        } else if (mode === 'forecast') {
+            if (!d.daily.time[forecastDayIndex]) {
+                mode = 'realtime';
+                forecastDayIndex = 0;
+                renderRealtimeUI(d);
+            } else {
+                renderForecastUI(forecastDayIndex);
+            }
+        }
+
+        renderForecastCards(d.daily);
+
+        const n = new Date();
+        document.getElementById('update-timestamp').innerHTML = `✅ 更新于 ${n.getHours().toString().padStart(2,'0')}:${n.getMinutes().toString().padStart(2,'0')}`;
+        document.getElementById('time-text').textContent = formatTime();
+
+    } catch (e) {
+        console.error('❌ 天气获取失败:', e);
+        document.getElementById('update-timestamp').innerHTML = `⚠️ 更新失败，${e.message || '请检查网络'}`;
+        document.getElementById('time-text').textContent = formatTime();
+    }
+}
+
+// ========== IP定位 + 最近城市匹配 ==========
+async function getLocationByIP() {
+    try {
+        const response = await fetch('https://ip-api.com/json/?fields=status,lat,lon,city,regionName,country');
+        if (!response.ok) throw new Error('IP定位服务响应失败');
+        const data = await response.json();
+        if (data.status === 'success') {
+            return { lat: data.lat, lon: data.lon, city: data.city, region: data.regionName };
+        }
+    } catch (e) {
+        console.warn('IP定位失败，使用默认城市', e);
+    }
+    return null;
+}
+
+function findNearestCity(lat, lon) {
+    let minDist = Infinity;
+    let nearestCity = null;
+    let nearestProvince = null;
+    for (const [province, cities] of Object.entries(CHINA_CITIES)) {
+        for (const [cityName, coords] of Object.entries(cities)) {
+            const [cityLat, cityLon] = coords;
+            const dist = Math.pow(cityLat - lat, 2) + Math.pow(cityLon - lon, 2);
+            if (dist < minDist) {
+                minDist = dist;
+                nearestCity = cityName;
+                nearestProvince = province;
+            }
+        }
+    }
+    if (nearestCity) {
+        return {
+            name: nearestCity,
+            province: nearestProvince,
+            lat: CHINA_CITIES[nearestProvince][nearestCity][0],
+            lon: CHINA_CITIES[nearestProvince][nearestCity][1]
+        };
+    }
+    return null;
+}
+
+async function initLocation() {
+    const ipLoc = await getLocationByIP();
+    if (ipLoc) {
+        const nearest = findNearestCity(ipLoc.lat, ipLoc.lon);
+        if (nearest) {
+            currentCity = {
+                name: nearest.name,
+                lat: nearest.lat,
+                lon: nearest.lon,
+                province: nearest.province
+            };
+            document.getElementById('city-name').textContent = currentCity.name;
+        }
+    }
+}
+
+// ========== 初始化 ==========
+async function init() {
+    await initLocation();
+    renderProvinceSelect();
+    renderCitySelect(currentCity.province);
+    bindSelectors();
+    document.getElementById('city-name').textContent = currentCity.name;
+    updateDateDisplay();
+    fetchWeatherAndUpdate();
+
+    // 自动更新（仅实时模式）
+    setInterval(() => {
+        if (mode === 'realtime') {
+            fetchWeatherAndUpdate();
+        }
+        document.getElementById('time-text').textContent = formatTime();
+        if (mode === 'realtime') {
+            updateDateDisplay();
+        }
+    }, 60000);
+}
+
+window.addEventListener('DOMContentLoaded', init);
